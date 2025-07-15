@@ -1,0 +1,13 @@
+[project]
+name = "foraging"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "chex>=0.1.89",
+    "flax>=0.10.7",
+    "gymnax>=0.0.9",
+    "jax>=0.6.2",
+    "pyglet>=2.1.6",
+]
