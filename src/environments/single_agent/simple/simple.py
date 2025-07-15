@@ -51,29 +51,52 @@ class EnvState(BaseEnvState):
 
 @struct.dataclass
 class EnvParams(BaseEnvParams):
-    initial_p_resource: float = 0.1
-    resource_growth_rate: float = 0.01
+    initial_p_resource: float = 0.05
+    spont_growth_rate: float = 0.001
+    adj_growth_rate: float = 0.005
+    death_rate: float = 0.03
     resource_value: float = 1.0
-    energy_decay_rate: float = 0.1
+    energy_decay_rate: float = 0.05
     max_energy: float = 10.0
     initial_energy: float = 5.0
     energy_threshold: float = 5.0
     reward_size: float = 0.1
     penalty_size: float = 0.0
-    max_steps_in_episode: int = 100
+    max_steps_in_episode: int = 1000
 
 
 class SimpleForagingEnv(Environment):
-    def __init__(self, grid_size: int, num_demonstrators: int, vision_range):
+    def __init__(
+        self,
+        grid_size: int,
+        num_demonstrators: int,
+        resource_vis_range: int,
+        demonstrator_vis_range: int,
+    ):
         super().__init__()
         self.grid_size = grid_size
         self.num_demonstrators = num_demonstrators
-        self.vision_range = vision_range
-        self.obs_size = (2 * vision_range) + 1
-        self.obs_indices_row, self.obs_indices_col = jnp.meshgrid(
-            jnp.arange(-self.vision_range, self.vision_range + 1),
-            jnp.arange(-self.vision_range, self.vision_range + 1),
+        self.resource_vis_range = resource_vis_range
+        self.demonstrator_vis_range = demonstrator_vis_range
+
+        self.max_vis_range = max(resource_vis_range, demonstrator_vis_range)
+        self.obs_size = (2 * self.max_vis_range) + 1
+
+        self.resource_vis_indices_row, self.resource_vis_indices_col = jnp.meshgrid(
+            jnp.arange(-self.resource_vis_range, self.resource_vis_range + 1),
+            jnp.arange(-self.resource_vis_range, self.resource_vis_range + 1),
             indexing="ij",
+        )
+        self.demonstrator_vis_indices_row, self.demonstrator_vis_indices_col = (
+            jnp.meshgrid(
+                jnp.arange(
+                    -self.demonstrator_vis_range, self.demonstrator_vis_range + 1
+                ),
+                jnp.arange(
+                    -self.demonstrator_vis_range, self.demonstrator_vis_range + 1
+                ),
+                indexing="ij",
+            )
         )
 
     @property
@@ -81,7 +104,13 @@ class SimpleForagingEnv(Environment):
         return EnvParams()
 
     def reset_env(self, key: chex.PRNGKey, params: EnvParams) -> Tuple[Obs, EnvState]:
-        resource_map = self.spawn_resources(key, params.initial_p_resource)
+        resource_map = self.update_resources(
+            key,
+            jnp.zeros((self.grid_size, self.grid_size), dtype=jnp.int32),
+            0.0,
+            params.initial_p_resource,
+            0.0,
+        )
         ego_agent_loc, ego_agent_dir, demonstrator_locs, demonstrator_dirs = (
             self.spawn_agents(key)
         )
@@ -106,17 +135,29 @@ class SimpleForagingEnv(Environment):
         )
 
         # resource dynamics
-        new_growth = self.spawn_resources(key, params.resource_growth_rate)
-        new_resource_map = jnp.sign(new_resource_map + new_growth)
+        new_resource_map = self.update_resources(
+            key,
+            new_resource_map,
+            params.adj_growth_rate,
+            params.spont_growth_rate,
+            params.death_rate,
+        )
 
         new_state = state.replace(
             resource_map=new_resource_map,
             ego_agent_loc=new_loc,
             ego_agent_dir=new_dir,
-            ego_agent_energy=state.ego_agent_energy + delta_energy,
+            ego_agent_energy=jnp.clip(
+                state.ego_agent_energy + delta_energy, 0, params.max_energy
+            ),
         )
-
-        return self.get_obs(new_state, params), new_state, 0.0, False, {}
+        return (
+            self.get_obs(new_state, params),
+            new_state,
+            self.compute_reward(new_state, params),
+            self.is_terminal(new_state, params),
+            {},
+        )
 
     def handle_action(
         self,
@@ -164,16 +205,45 @@ class SimpleForagingEnv(Environment):
         for i, loc in enumerate(state.demonstrator_locs):
             demonstrator_map = demonstrator_map.at[loc[0], loc[1]].set(1)
 
-        visual_field_r = state.ego_agent_loc[0] + self.obs_indices_row
-        visual_field_c = state.ego_agent_loc[1] + self.obs_indices_col
+        ego_r, ego_c = state.ego_agent_loc
+        resource_vis_r = ego_r + self.resource_vis_indices_row
+        resource_vis_c = ego_c + self.resource_vis_indices_col
+        dem_vis_r = ego_r + self.demonstrator_vis_indices_row
+        dem_vis_c = ego_c + self.demonstrator_vis_indices_col
 
-        obs = obs.at[:, :, 0].set(state.resource_map[visual_field_r, visual_field_c])
-        obs = obs.at[:, :, 1].set(demonstrator_map[visual_field_r, visual_field_c])
+        resource_view = state.resource_map[resource_vis_r, resource_vis_c]
+        demonstrator_view = demonstrator_map[dem_vis_r, dem_vis_c]
+
+        # pad
+        resource_pad = self.max_vis_range - self.resource_vis_range
+        dem_pad = self.max_vis_range - self.demonstrator_vis_range
+        resource_view = jnp.pad(
+            resource_view,
+            ((resource_pad, resource_pad), (resource_pad, resource_pad)),
+            mode="constant",
+        )
+        demonstrator_view = jnp.pad(
+            demonstrator_view, ((dem_pad, dem_pad), (dem_pad, dem_pad)), mode="constant"
+        )
+
+        obs = obs.at[:, :, 0].set(resource_view)
+        obs = obs.at[:, :, 1].set(demonstrator_view)
 
         return jnp.select(
             [state.ego_agent_dir == direction for direction in range(4)],
             [jnp.rot90(obs, k=k, axes=(0, 1)) for k in range(4)],
         )
+
+    def compute_reward(self, state: EnvState, params: EnvParams) -> chex.Array:
+        return jnp.where(
+            state.ego_agent_energy >= params.energy_threshold,
+            params.reward_size,
+            params.penalty_size,
+        )
+
+    def is_terminal(self, state: EnvState, params: EnvParams) -> chex.Array:  # type: ignore
+        """Check whether state is terminal."""
+        return state.time >= params.max_steps_in_episode  # type: ignore
 
     def action_space(self, params: Optional[EnvParams] = None) -> spaces.Discrete:
         return spaces.Discrete(len(Action))
@@ -181,10 +251,27 @@ class SimpleForagingEnv(Environment):
     def observation_space(self, params: Optional[EnvParams] = None) -> spaces.Box:
         raise NotImplementedError
 
-    def spawn_resources(self, key: chex.PRNGKey, p: float) -> chex.Array:
-        return jax.random.bernoulli(key, p, (self.grid_size, self.grid_size)).astype(
-            jnp.int32
-        )
+    def update_resources(
+        self,
+        key: chex.PRNGKey,
+        current: chex.Array,
+        p_adj: float,
+        p_spont: float,
+        p_death: float,
+    ) -> chex.Array:
+        p_deaths = p_death * current
+        current -= jax.random.bernoulli(key, p_deaths, current.shape).astype(jnp.int32)
+
+        p_adjs = p_adj * self.get_n_neighbours(current)
+        adj_growth = jax.random.bernoulli(
+            key, p_adjs, (self.grid_size, self.grid_size)
+        ).astype(jnp.int32)
+
+        spont_growth = jax.random.bernoulli(
+            key, p_spont, (self.grid_size, self.grid_size)
+        ).astype(jnp.int32)
+
+        return jnp.clip(current + adj_growth + spont_growth, 0, 1).astype(jnp.int32)
 
     def spawn_agents(
         self, key: chex.PRNGKey
@@ -199,6 +286,23 @@ class SimpleForagingEnv(Environment):
             dem_key, (self.num_demonstrators, 2), 0, 4
         )
         return ego_agent_loc, ego_agent_dir, demonstrator_locs, demonstrator_dirs
+
+    def get_n_neighbours(self, x: chex.Array) -> chex.Array:
+        def helper(i, j):
+            return (
+                x[i - 1, j]
+                + x[i + 1, j]
+                + x[i, j - 1]
+                + x[i, j + 1]
+                + x[i - 1, j - 1]
+                + x[i - 1, j + 1]
+                + x[i + 1, j - 1]
+                + x[i + 1, j + 1]
+            )
+
+        return jax.vmap(jax.vmap(helper, in_axes=(None, 0)), in_axes=(0, None))(
+            jnp.arange(x.shape[0]), jnp.arange(x.shape[1])
+        )
 
     def _init_render(self):
         from .rendering import Viewer
@@ -219,6 +323,13 @@ class SimpleForagingEnv(Environment):
             self.viewer.close()
 
 
-def make(grid_size: int, num_demonstrators: int, obs_size: int):
-    env = SimpleForagingEnv(grid_size, num_demonstrators, obs_size)
+def make(
+    grid_size: int,
+    num_demonstrators: int,
+    resource_vis_range: int,
+    demonstrator_vis_range: int,
+):
+    env = SimpleForagingEnv(
+        grid_size, num_demonstrators, resource_vis_range, demonstrator_vis_range
+    )
     return env, env.default_params

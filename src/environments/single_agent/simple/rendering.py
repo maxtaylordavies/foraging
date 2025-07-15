@@ -50,7 +50,7 @@ class Viewer(object):
         display = get_display(None)
         self.rows, self.cols = world_size
 
-        self.grid_size = 100
+        self.grid_size = 30
 
         self.width = 1 + self.cols * (self.grid_size + 1)
         self.height = 1 + self.rows * (self.grid_size + 1)
@@ -174,31 +174,3 @@ class Viewer(object):
             color=_RED,
         )
         agent.draw()
-
-    # def _draw_goal(self, env_state: EnvState):
-    #     # draw goal as red square
-    #     goal_x, goal_y = env_state.goal_loc
-    #     goal_x = goal_x * (self.grid_size + 1) + 1
-    #     goal_y = self.height - (self.grid_size + 1) * (goal_y + 1) + 1
-    #     goal = shapes.Rectangle(
-    #         goal_x,
-    #         goal_y,
-    #         self.grid_size,
-    #         self.grid_size,
-    #         color=_RED,
-    #     )
-    #     goal.draw()
-
-    # def _draw_agent(self, env_state: EnvState):
-    #     # draw agent as blue square
-    #     agent_x, agent_y = env_state.agent_loc
-    #     agent_x = agent_x * (self.grid_size + 1) + 1
-    #     agent_y = self.height - (self.grid_size + 1) * (agent_y + 1) + 1
-    #     agent = shapes.Rectangle(
-    #         agent_x,
-    #         agent_y,
-    #         self.grid_size,
-    #         self.grid_size,
-    #         color=_BLUE,
-    #     )
-    #     agent.draw()
