@@ -48,6 +48,8 @@ class Environment(Generic[TEnvState, TEnvParams]):  # object):
         key, key_reset = jax.random.split(key)
         obs_st, state_st, reward, done, info = self.step_env(key, state, action, params)
 
+        # obs, state = obs_st, state_st
+
         obs_re, state_re = self.reset_env(key_reset, params)
         # Auto-reset environment based on termination
         state = jax.tree_util.tree_map(
