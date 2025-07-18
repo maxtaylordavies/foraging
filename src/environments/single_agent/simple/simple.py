@@ -257,7 +257,7 @@ class SimpleForagingEnv(Environment):
                 consumed[rc[2]] > 0, scatter_zero, no_op, rm, rc[:2]  # rc = (r, c, idx)
             )
 
-        idxs = jnp.arange(locs.shape[0], dtype=jnp.int32)
+        idxs = jnp.arange(locs.shape[0], dtype=jnp.int8)
         rc_triplet = jnp.stack([r, c, idxs], axis=1)
 
         new_resource_map = jax.lax.fori_loop(
@@ -373,10 +373,58 @@ class SimpleForagingEnv(Environment):
         return ego_agent_loc, ego_agent_dir, demonstrator_locs, demonstrator_dirs
 
     def sample_demonstrator_action(
-        self, key: chex.PRNGKey, env_state: EnvState, idx: int
+        self, key: chex.PRNGKey, env_state: EnvState, idx: int, epsilon: float = 0.1
     ) -> chex.Array:
-        # for now just return random action
-        return jax.random.randint(key, (), 0, len(Action))
+        loc, dir_ = env_state.demonstrator_locs[idx], env_state.demonstrator_dirs[idx]
+
+        # get manhattan distances to all grid tiles
+        r, c = jnp.indices((self.grid_size, self.grid_size))
+        dists = jnp.abs(r - loc[0]) + jnp.abs(c - loc[1])
+
+        # find the closest food resource
+        dists = jnp.where(env_state.resource_map == 1, dists, jnp.inf)
+        target = jnp.unravel_index(jnp.argmin(dists), dists.shape)
+
+        action = self.move_toward_or_eat(loc, dir_, target)
+        random_action = jax.random.randint(key, (), 0, len(Action))
+
+        return jax.lax.select(jax.random.uniform(key) < 0.1, random_action, action)
+
+    def move_toward_or_eat(
+        self, loc: chex.Array, dir: chex.Array, target: chex.Array
+    ) -> chex.Array:
+        # get the direction to the target
+        d_row, d_col = target[0] - loc[0], target[1] - loc[1]
+        same_cell = (d_row == 0) & (d_col == 0)
+
+        # pick the axis with the larger |delta|
+        choose_row = jnp.abs(d_row) > jnp.abs(d_col)
+        desired_dir_row = jnp.where(
+            d_row > 0, Direction.SOUTH.value, Direction.NORTH.value
+        )
+        desired_dir_col = jnp.where(
+            d_col > 0, Direction.EAST.value, Direction.WEST.value
+        )
+        desired_dir = jnp.where(choose_row, desired_dir_row, desired_dir_col)
+
+        # select the action
+        # diff : 0 => already facing  | 1 => 90° right  | 3 => 90° left | 2 => reverse
+        diff = (desired_dir - dir) & 3  # mod 4
+        return jnp.select(
+            [
+                same_cell,  # 0. standing on the food
+                diff == 0,  # 1. go forward
+                diff == 1,  # 2. rotate right
+                diff == 3,  # 3. rotate left
+            ],
+            [
+                Action.EAT.value,
+                Action.FORWARD.value,
+                Action.ROTATE_RIGHT.value,
+                Action.ROTATE_LEFT.value,
+            ],
+            default=Action.ROTATE_RIGHT.value,  # diff==2 → pick one turn
+        )
 
     def _init_render(self):
         from .rendering import Viewer
